@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inventree-virtual-bins"
+description = "A visual view of the bins in an InvenTree stock location"
+dynamic = ["version"]
+authors = [
+    { name = "EdgeMachines" },
+]
+readme = "README.md"
+license = "MIT"
+keywords = ["inventree", "plugin", "stock", "location", "bins", "kanban", "stocktake"]
+requires-python = ">=3.9"
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Framework :: InvenTree",
+]
+
+[project.urls]
+Homepage = "https://github.com/nemccarthy/inventree-visual-stock-bins"
+Repository = "https://github.com/nemccarthy/inventree-visual-stock-bins"
+Issues = "https://github.com/nemccarthy/inventree-visual-stock-bins/issues"
+Changelog = "https://github.com/nemccarthy/inventree-visual-stock-bins/blob/main/CHANGELOG.md"
+
+[project.entry-points."inventree_plugins"]
+VirtualBinsPlugin = "inventree_virtual_bins.core:VirtualBinsPlugin"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["inventree_virtual_bins*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "inventree_virtual_bins.PLUGIN_VERSION"}
