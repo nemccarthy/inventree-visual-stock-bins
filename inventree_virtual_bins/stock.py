@@ -1081,3 +1081,232 @@ def locate_matches(entries: list[dict], location, layout: dict, tree: Tree | Non
             out.append({'bins': hits, 'unit': whole_unit, 'age': entry.get('age', 0), 'at': entry['at']})
 
     return out
+
+
+# Layout files
+
+
+def export_layout_file(location, layout: dict) -> dict:
+    """A layout as a file to download: the document, and the same as text."""
+    import re
+
+    from part.models import Part
+    from stock.models import StockLocation
+
+    bins = layouts.all_bins(layout)
+    part_ids = {item['part'] for item in bins if item['part']}
+    location_ids = {item['location'] for item in bins if item['location']}
+
+    if layout.get('product'):
+        part_ids.add(layout['product'])
+
+    parts = {
+        row['pk']: {'ipn': row['IPN'] or '', 'name': row['name']}
+        for row in Part.objects.filter(pk__in=part_ids).values('pk', 'IPN', 'name')
+    }
+    locations = {
+        row['pk']: {'path': row['pathstring']}
+        for row in StockLocation.objects.filter(pk__in=location_ids).values('pk', 'pathstring')
+    }
+
+    doc = layouts.export_layout(
+        layout,
+        name=location.name,
+        parts=parts,
+        locations=locations,
+        unit_path=location.pathstring,
+    )
+
+    slug = re.sub(r'[^a-z0-9]+', '-', location.name.lower()).strip('-') or f'location-{location.pk}'
+
+    return {
+        'filename': f'virtual-bins-{slug}.json',
+        'data': doc,
+        'text': layouts.format_layout_file(doc),
+    }
+
+
+def import_layout_file(doc, location, previous: dict | None = None) -> dict:
+    """Turn a layout file into a layout for a location. Nothing is saved.
+
+    Parts are matched by IPN and name, locations by path (see layout.py). A
+    bin whose part or location cannot be found is kept, as a placeholder with
+    its label, and listed in the report.
+    """
+    from django.db.models.functions import Lower
+
+    from part.models import Part
+    from stock.models import StockLocation
+
+    try:
+        parsed = layouts.parse_layout_file(doc)
+    except layouts.LayoutError as exc:
+        raise ValidationError({'detail': str(exc)})
+
+    unit_path = location.pathstring
+    want = layouts.wanted(parsed)
+
+    parts: list[dict] = []
+
+    if want['part_pks'] or want['part_texts']:
+        parts = [
+            {
+                'pk': row['pk'],
+                'ipn': row['IPN'] or '',
+                'name': row['name'],
+                'virtual': row['virtual'],
+                'assembly': row['assembly'],
+            }
+            for row in Part.objects.annotate(vb_ipn=Lower('IPN'), vb_name=Lower('name'))
+            .filter(
+                Q(pk__in=want['part_pks'])
+                | Q(vb_ipn__in=[text.lower() for text in want['part_texts']])
+                | Q(vb_name__in=[text.lower() for text in want['part_texts']])
+            )
+            .values('pk', 'IPN', 'name', 'virtual', 'assembly')
+        ]
+
+    places: list[dict] = []
+
+    if want['location_pks'] or want['location_paths']:
+        paths = {
+            layouts.absolute_path(path, unit_path).lower() for path in want['location_paths']
+        }
+        places = [
+            {'pk': row['pk'], 'path': row['pathstring'], 'name': row['name']}
+            for row in StockLocation.objects.annotate(vb_path=Lower('pathstring'))
+            .filter(Q(pk__in=want['location_pks']) | Q(vb_path__in=paths))
+            .values('pk', 'pathstring', 'name')
+        ]
+
+    by_part = {part['pk']: part for part in parts}
+    unresolved = []
+    matched = 0
+    placeholders = 0
+    rows = []
+
+    for r, row in enumerate(parsed['rows']):
+        columns = []
+
+        for c, column in enumerate(row['columns']):
+            bins = []
+
+            for item in column:
+                part_pk = None
+                location_pk = None
+                problems = []
+
+                if item['part']:
+                    part_pk, why = layouts.match_part(item['part'], parts)
+
+                    if part_pk and by_part[part_pk]['virtual']:
+                        part_pk, why = None, 'it is a virtual part, which has no stock'
+
+                    if not part_pk:
+                        problems.append({
+                            'kind': 'part',
+                            'wanted': layouts.describe_ref(item['part']),
+                            'reason': why,
+                        })
+
+                if item['location']:
+                    location_pk, why = layouts.match_location(item['location'], places, unit_path)
+
+                    if not location_pk:
+                        problems.append({
+                            'kind': 'location',
+                            'wanted': layouts.describe_ref(item['location']),
+                            'reason': why,
+                        })
+
+                # A bin which lost its part keeps a name people can recognise it by
+                label = item['label']
+
+                if not label and item['part'] and not part_pk:
+                    label = (
+                        item['part']['name'] or item['part']['text'] or item['part']['ipn']
+                    )[: layouts.MAX_LABEL]
+
+                if not item['part'] and not item['location']:
+                    placeholders += 1
+                elif not problems:
+                    matched += 1
+
+                shown = label or (by_part[part_pk]['name'] if part_pk else '')
+
+                for problem in problems:
+                    unresolved.append({
+                        **problem,
+                        'label': shown or problem['wanted'],
+                        'row': r + 1,
+                        'column': c + 1,
+                    })
+
+                bins.append({
+                    'id': item['id'],
+                    'part': part_pk,
+                    'location': location_pk,
+                    'label': label,
+                    'size': item['size'],
+                    'min': item['min'],
+                    'max': item['max'],
+                    'note': item['note'],
+                })
+
+            columns.append({'bins': bins})
+
+        rows.append({'name': row['name'], 'columns': columns})
+
+    product_pk = None
+    product_problem = None
+
+    if parsed['product']:
+        product_pk, why = layouts.match_part(parsed['product'], parts)
+
+        if product_pk and not by_part[product_pk]['assembly']:
+            product_pk, why = None, 'it is not an assembly'
+
+        if not product_pk:
+            product_problem = f'{layouts.describe_ref(parsed["product"])}: {why}'
+
+    try:
+        layout = layouts.clean_layout(
+            {'kind': parsed['kind'], 'product': product_pk, 'rows': rows}, strict=True
+        )
+    except layouts.LayoutError as exc:
+        raise ValidationError({'detail': str(exc)})
+
+    layout = layouts.reuse_ids(layout, previous)
+
+    final = layouts.all_bins(layout)
+    part_ids = {item['part'] for item in final if item['part']}
+    location_ids = {item['location'] for item in final if item['location']}
+
+    if layout['product']:
+        part_ids.add(layout['product'])
+
+    by_place = {place['pk']: place for place in places}
+
+    return {
+        'layout': layout,
+        'report': {
+            'name': parsed['name'],
+            'bins': len(final),
+            'matched': matched,
+            'placeholders': placeholders,
+            'unresolved': unresolved,
+            'product': product_problem,
+        },
+        # Names for the editor to show
+        'parts': part_info(part_ids),
+        'locations': {
+            pk: {
+                'pk': pk,
+                'name': by_place[pk]['name'],
+                'pathstring': by_place[pk]['path'],
+                'structural': False,
+            }
+            for pk in location_ids
+            if pk in by_place
+        },
+    }

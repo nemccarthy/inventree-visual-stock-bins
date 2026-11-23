@@ -76,7 +76,9 @@ export function BinTile(props: Readonly<TileProps>) {
   const { size, u, status, compact } = props;
   const width = Math.round(SIZE[size].w * u);
   const bodyHeight = Math.round(SIZE[size].h * u);
-  const lines = u >= 80 ? 2 : 1;
+  // Two lines at every scale: on a long bench the bins are narrow, and one
+  // line would cut "Battery holder, 2 cell" and "Battery lead, 80 mm" to the same text
+  const lines = 2;
   const labelFont = u >= 80 ? 11.5 : 10.5;
   const labelHeight = Math.round(lines * labelFont * 1.2 + 8);
   const scale = size === 'l' ? 1.25 : size === 'm' ? 1.1 : 1;

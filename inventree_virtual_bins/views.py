@@ -274,6 +274,57 @@ class AutofillView(BinsView):
         })
 
 
+class ExportView(BinsView):
+    """GET / POST /plugin/virtual-bins/unit/<location id>/export/ - a layout as a file.
+
+    GET gives the saved layout. POST {"layout": {...}} gives that layout
+    instead (the editor uses it for a layout which is not saved yet).
+
+    Returns {"filename", "data", "text"}: the layout file as an object and as
+    the text to save. In the file, parts are named by IPN and name and
+    locations by path, so that it can be uploaded somewhere else.
+    """
+
+    def get(self, request, pk: int, *args, **kwargs):
+        location, layout = self.unit(pk)
+
+        return Response(stocks.export_layout_file(location, layout))
+
+    def post(self, request, pk: int, *args, **kwargs):
+        location = self.location(pk)
+        raw = request.data.get('layout')
+
+        if isinstance(raw, dict):
+            layout = layouts.clean_layout(raw)
+        else:
+            layout = store.get_layout(location)
+
+            if layout is None:
+                raise NotFound('No bins have been set up for this location')
+
+        return Response(stocks.export_layout_file(location, layout))
+
+
+class ImportView(BinsView):
+    """POST /plugin/virtual-bins/unit/<location id>/import/ - read a layout file.
+
+    {"data": <the layout file, as an object>}
+
+    Nothing is saved: the layout is returned for editing, with a report of the
+    bins whose part or location could not be found.
+    """
+
+    def post(self, request, pk: int, *args, **kwargs):
+        self.require(request, 'layout')
+        location = self.location(pk)
+
+        return Response(
+            stocks.import_layout_file(
+                request.data.get('data'), location, store.get_layout(location)
+            )
+        )
+
+
 class AdjustView(BinsView):
     """POST /plugin/virtual-bins/unit/<location id>/bin/<bin id>/adjust/ - change the stock of a bin.
 

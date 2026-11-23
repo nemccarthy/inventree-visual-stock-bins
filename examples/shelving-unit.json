@@ -1,0 +1,36 @@
+{
+  "format": "inventree-virtual-bins",
+  "version": 1,
+  "name": "Shelving unit A",
+  "kind": "shelving",
+  "product": null,
+  "rows": [
+    {
+      "name": "Shelf 1",
+      "columns": [
+        [{"part": {"ipn": "EL-302", "name": "Radio module"}, "location": "./A1-1", "size": "s", "min": 20, "max": 60}],
+        [{"part": {"ipn": "EL-303", "name": "Antenna, stub"}, "location": "./A1-2", "size": "s", "min": 20, "max": 60}],
+        [{"part": {"ipn": "EL-311", "name": "Battery holder, 2 cell"}, "location": "./A1-3", "size": "s", "min": 20, "max": 60}],
+        [{"part": {"ipn": "EL-312", "name": "Battery lead, 80 mm"}, "location": "./A1-4", "size": "s", "min": 40, "max": 120}]
+      ]
+    },
+    {
+      "name": "Shelf 2",
+      "columns": [
+        [{"part": {"ipn": "ME-404", "name": "Cable gland M12"}, "location": "./A2-1", "size": "s", "min": 20, "max": 80}],
+        [{"part": {"ipn": "ME-405", "name": "Vent membrane"}, "location": "./A2-2", "size": "s", "min": 50, "max": 200}],
+        [{"part": {"ipn": "ME-403", "name": "Lid gasket"}, "location": "./A2-3", "size": "s", "min": 40, "max": 120}],
+        [{"part": {"ipn": "ME-406", "name": "Mounting bracket"}, "location": "./A2-4", "size": "s", "min": 6, "max": 20}]
+      ]
+    },
+    {
+      "name": "Shelf 3",
+      "columns": [
+        [{"part": {"ipn": "FA-501", "name": "Screw M3x10, pan head"}, "location": "./A3-1", "size": "s", "min": 500, "max": 2000}],
+        [{"part": {"ipn": "FA-502", "name": "Washer M3, nylon"}, "location": "./A3-2", "size": "s", "min": 500, "max": 2000}],
+        [{"part": {"ipn": "FA-503", "name": "Screw M4x12, bracket"}, "location": "./A3-3", "size": "s", "min": 200, "max": 800}],
+        [{"label": "A3-4", "location": "./A3-4", "size": "s"}]
+      ]
+    }
+  ]
+}

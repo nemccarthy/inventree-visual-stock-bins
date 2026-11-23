@@ -1,0 +1,49 @@
+{
+  "format": "inventree-virtual-bins",
+  "version": 1,
+  "name": "Assembly bench 1",
+  "kind": "bench",
+  "product": {"ipn": "OSN-100", "name": "Outdoor Sensor Node"},
+  "rows": [
+    {
+      "name": "Left bay",
+      "columns": [
+        [{"part": {"ipn": "EL-301", "name": "Main board PCBA"}, "size": "m", "min": 10, "max": 30}],
+        [
+          {"part": {"ipn": "EL-302", "name": "Radio module"}, "size": "s", "min": 10, "max": 30},
+          {"part": {"ipn": "EL-303", "name": "Antenna, stub"}, "size": "s", "min": 10, "max": 30}
+        ],
+        [{"part": {"ipn": "SA-210", "name": "Battery pack"}, "size": "m", "min": 8, "max": 24}],
+        [
+          {"part": {"ipn": "EL-310", "name": "Li-ion cell 18650"}, "size": "s", "min": 40, "max": 120},
+          {"part": {"ipn": "EL-311", "name": "Battery holder, 2 cell"}, "size": "s", "min": 20, "max": 60},
+          {"part": {"ipn": "EL-312", "name": "Battery lead, 80 mm"}, "size": "s", "min": 20, "max": 60}
+        ],
+        [{"part": {"ipn": "ME-401", "name": "Enclosure base"}, "size": "l", "min": 8, "max": 24}],
+        [{"part": {"ipn": "ME-402", "name": "Enclosure lid"}, "size": "l", "min": 8, "max": 24}],
+        [{"part": {"ipn": "ME-403", "name": "Lid gasket"}, "size": "s", "min": 20, "max": 80}]
+      ]
+    },
+    {
+      "name": "Right bay",
+      "columns": [
+        [
+          {"part": {"ipn": "ME-404", "name": "Cable gland M12"}, "size": "s", "min": 30, "max": 100},
+          {"part": {"ipn": "ME-405", "name": "Vent membrane"}, "size": "s", "min": 20, "max": 100}
+        ],
+        [{"part": {"ipn": "ME-406", "name": "Mounting bracket"}, "size": "m", "min": 8, "max": 24}],
+        [
+          {"part": {"ipn": "FA-501", "name": "Screw M3x10, pan head"}, "size": "s", "min": 200, "max": 1000},
+          {"part": {"ipn": "FA-502", "name": "Washer M3, nylon"}, "size": "s", "min": 200, "max": 1000}
+        ],
+        [{"part": {"ipn": "FA-503", "name": "Screw M4x12, bracket"}, "size": "s", "min": 100, "max": 500}],
+        [
+          {"part": {"ipn": "PK-601", "name": "Product label"}, "size": "s", "min": 40, "max": 200},
+          {"part": {"ipn": "PK-602", "name": "Desiccant pack 2 g"}, "size": "s", "min": 20, "max": 100}
+        ],
+        [{"part": {"ipn": "CO-701", "name": "Thread locker, blue"}, "size": "s", "min": 1, "max": 4, "note": "Replace when a bottle is opened"}],
+        [{"label": "Spare bin", "size": "s"}]
+      ]
+    }
+  ]
+}

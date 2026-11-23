@@ -248,3 +248,34 @@ export interface AutofillResult {
 }
 
 export type AdjustAction = 'count' | 'add' | 'remove' | 'move' | 'refill';
+
+export interface ExportResult {
+  filename: string;
+  data: Record<string, unknown>;
+  text: string;
+}
+
+export interface ImportProblem {
+  kind: 'part' | 'location';
+  /** What the file asked for */
+  wanted: string;
+  reason: string;
+  /** What the bin is called on the drawing */
+  label: string;
+  row: number;
+  column: number;
+}
+
+export interface ImportResult {
+  layout: Layout;
+  report: {
+    name: string;
+    bins: number;
+    matched: number;
+    placeholders: number;
+    unresolved: ImportProblem[];
+    product: string | null;
+  };
+  parts: Record<string, PartInfo>;
+  locations: Record<string, LocationInfo>;
+}

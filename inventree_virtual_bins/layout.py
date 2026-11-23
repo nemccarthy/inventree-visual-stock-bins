@@ -831,3 +831,622 @@ def summarise(statuses: list[str]) -> dict:
         'empty': statuses.count('empty'),
         'unassigned': statuses.count('unassigned'),
     }
+
+
+# Layout files
+#
+# A layout can be downloaded as a JSON file, edited by hand and uploaded into
+# another location, or into another InvenTree. In the file a part is named by
+# its IPN and name as well as its number, and a location by its path, so that
+# the file still means something where the numbers are different.
+
+FILE_FORMAT = 'inventree-virtual-bins'
+FILE_VERSION = 1
+
+# Longest text accepted for an IPN, a part name or a location path
+MAX_REFERENCE = 250
+
+
+def _same(a, b) -> bool:
+    """Compare two texts the way a layout file is matched: ignoring case and outer spaces."""
+    return str(a or '').strip().casefold() == str(b or '').strip().casefold()
+
+
+def _fold(value) -> str:
+    return str(value or '').strip().casefold()
+
+
+def part_ref(value) -> dict | None:
+    """Read how a layout file names a part.
+
+    - a number: the part with that primary key
+    - a text: the part with that IPN, or failing that with that name
+    - an object: {"ipn": ..., "name": ..., "pk": ...}, any of the three
+
+    Returns {'pk', 'ipn', 'name', 'text'} or None. Raises LayoutError for
+    anything else.
+    """
+    if value is None or value == '' or value == {}:
+        return None
+
+    if isinstance(value, bool):
+        raise LayoutError('A part must be a number, a text or an object')
+
+    if isinstance(value, (int, float)):
+        pk = _pk(value)
+
+        if pk is None:
+            raise LayoutError('A part number must be a positive whole number')
+
+        return {'pk': pk, 'ipn': '', 'name': '', 'text': ''}
+
+    if isinstance(value, str):
+        text = _text(value, MAX_REFERENCE)
+
+        return {'pk': None, 'ipn': '', 'name': '', 'text': text} if text else None
+
+    if isinstance(value, dict):
+        raw_pk = value.get('pk', value.get('id'))
+
+        if raw_pk not in (None, '') and _pk(raw_pk) is None:
+            raise LayoutError('A part number ("pk") must be a positive whole number')
+
+        ref = {
+            'pk': _pk(raw_pk),
+            'ipn': _text(value.get('ipn', value.get('IPN')), MAX_REFERENCE),
+            'name': _text(value.get('name'), MAX_REFERENCE),
+            'text': '',
+        }
+
+        return ref if ref['pk'] or ref['ipn'] or ref['name'] else None
+
+    raise LayoutError('A part must be a number, a text or an object')
+
+
+def location_ref(value) -> dict | None:
+    """Read how a layout file names a location.
+
+    - a number: the location with that primary key
+    - a text: the location with that path ("Stores/Shelf A/A1"), or a path
+      below the unit when it starts with "./" ("./A1")
+    - an object: {"path": ..., "pk": ...}
+
+    Returns {'pk', 'path'} or None.
+    """
+    if value is None or value == '' or value == {}:
+        return None
+
+    if isinstance(value, bool):
+        raise LayoutError('A location must be a number, a path or an object')
+
+    if isinstance(value, (int, float)):
+        pk = _pk(value)
+
+        if pk is None:
+            raise LayoutError('A location number must be a positive whole number')
+
+        return {'pk': pk, 'path': ''}
+
+    if isinstance(value, str):
+        path = _text(value, MAX_REFERENCE)
+
+        return {'pk': None, 'path': path} if path else None
+
+    if isinstance(value, dict):
+        raw_pk = value.get('pk', value.get('id'))
+
+        if raw_pk not in (None, '') and _pk(raw_pk) is None:
+            raise LayoutError('A location number ("pk") must be a positive whole number')
+
+        ref = {'pk': _pk(raw_pk), 'path': _text(value.get('path'), MAX_REFERENCE)}
+
+        return ref if ref['pk'] or ref['path'] else None
+
+    raise LayoutError('A location must be a number, a path or an object')
+
+
+def describe_ref(ref: dict | None) -> str:
+    """A reference as a person would write it, for messages."""
+    if not ref:
+        return ''
+
+    words = [ref.get('name') or ref.get('text') or ref.get('path') or '']
+
+    if ref.get('ipn'):
+        words.append(f"({ref['ipn']})" if words[0] else ref['ipn'])
+
+    text = ' '.join(word for word in words if word)
+
+    return text or f"number {ref.get('pk')}"
+
+
+def absolute_path(path: str, unit_path: str) -> str:
+    """Turn a path from a layout file into a full location path.
+
+    "./A1" and "." are below the unit; anything else is a full path already.
+    """
+    path = path.strip()
+
+    if path == '.':
+        return unit_path
+
+    if path.startswith('./'):
+        rest = path[2:].strip('/')
+
+        return f'{unit_path}/{rest}' if rest else unit_path
+
+    return path.strip('/')
+
+
+def relative_path(path: str, unit_path: str) -> str:
+    """Write a location path for a layout file: "./A1" when it is below the unit."""
+    if unit_path and path == unit_path:
+        return '.'
+
+    if unit_path and path.startswith(f'{unit_path}/'):
+        return f'./{path[len(unit_path) + 1:]}'
+
+    return path
+
+
+def parse_layout_file(doc) -> dict:
+    """Read a layout file into bins with references which are still to be matched.
+
+    Accepts the file as it is downloaded, a file written by hand, and a layout
+    as the API stores it (columns as {"bins": [...]}, parts as numbers).
+
+    Returns {'name', 'kind', 'product', 'rows': [{'name', 'columns': [[bin]]}]}
+    where a bin is {'id', 'label', 'part', 'location', 'size', 'min', 'max',
+    'note'} and 'part' / 'location' / 'product' are references or None.
+
+    Raises LayoutError, with a message which says where, for a file which
+    cannot be used.
+    """
+    if not isinstance(doc, dict):
+        raise LayoutError('This is not a layout file: it must be a JSON object')
+
+    file_format = doc.get('format')
+
+    if file_format not in (None, '') and file_format != FILE_FORMAT:
+        raise LayoutError(f'This is not a Virtual Bins layout file (its format is "{file_format}")')
+
+    version = doc.get('version')
+
+    if version not in (None, ''):
+        if isinstance(version, bool) or not isinstance(version, (int, float)):
+            raise LayoutError('The version of the layout file must be a number')
+
+        if version > FILE_VERSION:
+            raise LayoutError(
+                f'This layout file was made by a newer version of the plugin (file version {version:g})'
+            )
+
+    kind = doc.get('kind')
+
+    if kind in (None, ''):
+        kind = 'bench'
+    elif kind not in KINDS:
+        raise LayoutError(f'"kind" must be one of {", ".join(KINDS)}')
+
+    try:
+        product = part_ref(doc.get('product'))
+    except LayoutError as exc:
+        raise LayoutError(f'Product: {exc}')
+
+    rows_in = doc.get('rows')
+
+    if not isinstance(rows_in, list):
+        raise LayoutError('The layout file has no "rows"')
+
+    if len(rows_in) > MAX_ROWS:
+        raise LayoutError(f'A unit can have at most {MAX_ROWS} rows')
+
+    rows = []
+    total = 0
+
+    for r, raw_row in enumerate(rows_in, start=1):
+        if isinstance(raw_row, list):
+            # A row written as just its columns
+            raw_row = {'columns': raw_row}
+
+        if not isinstance(raw_row, dict):
+            raise LayoutError(f'Row {r} must be an object')
+
+        columns_in = raw_row.get('columns')
+
+        if columns_in is None:
+            columns_in = []
+
+        if not isinstance(columns_in, list):
+            raise LayoutError(f'Row {r}: "columns" must be a list')
+
+        if len(columns_in) > MAX_COLUMNS:
+            raise LayoutError(f'Row {r}: a row can have at most {MAX_COLUMNS} columns')
+
+        columns = []
+
+        for c, raw_column in enumerate(columns_in, start=1):
+            where = f'Row {r}, column {c}'
+
+            if isinstance(raw_column, dict) and 'bins' in raw_column:
+                bins_in = raw_column.get('bins')
+            elif isinstance(raw_column, dict):
+                # A column of one bin, written without its list
+                bins_in = [raw_column]
+            else:
+                bins_in = raw_column
+
+            if not isinstance(bins_in, list):
+                raise LayoutError(f'{where} must be a list of bins')
+
+            if len(bins_in) > MAX_STACK:
+                raise LayoutError(f'{where}: a stack can have at most {MAX_STACK} bins')
+
+            bins = []
+
+            for b, raw_bin in enumerate(bins_in, start=1):
+                spot = f'{where}, bin {b}' if len(bins_in) > 1 else where
+
+                if not isinstance(raw_bin, dict):
+                    raise LayoutError(f'{spot} must be an object')
+
+                size = raw_bin.get('size')
+
+                if size in (None, ''):
+                    size = 's'
+                elif size not in SIZES:
+                    raise LayoutError(f'{spot}: "size" must be one of {", ".join(SIZES)}')
+
+                levels = {}
+
+                for key in ('min', 'max'):
+                    value = raw_bin.get(key)
+
+                    if value in (None, ''):
+                        levels[key] = None
+                    elif number(value) is None:
+                        raise LayoutError(f'{spot}: "{key}" must be a number of zero or more')
+                    else:
+                        levels[key] = number(value)
+
+                if (
+                    levels['min'] is not None
+                    and levels['max'] is not None
+                    and levels['max'] < levels['min']
+                ):
+                    raise LayoutError(f'{spot}: "max" cannot be below "min"')
+
+                try:
+                    part = part_ref(raw_bin.get('part'))
+                    place = location_ref(raw_bin.get('location'))
+                except LayoutError as exc:
+                    raise LayoutError(f'{spot}: {exc}')
+
+                raw_id = raw_bin.get('id')
+
+                bins.append({
+                    'id': raw_id if isinstance(raw_id, str) else None,
+                    'label': _text(raw_bin.get('label'), MAX_LABEL),
+                    'part': part,
+                    'location': place,
+                    'size': size,
+                    'min': levels['min'],
+                    'max': levels['max'],
+                    'note': _text(raw_bin.get('note'), MAX_NOTE),
+                })
+
+            if not bins:
+                continue
+
+            total += len(bins)
+
+            if total > MAX_BINS:
+                raise LayoutError(f'A unit can have at most {MAX_BINS} bins')
+
+            columns.append(bins)
+
+        rows.append({'name': _text(raw_row.get('name'), MAX_NAME), 'columns': columns})
+
+    return {
+        'name': _text(doc.get('name'), MAX_REFERENCE),
+        'kind': kind,
+        'product': product,
+        'rows': rows,
+    }
+
+
+def file_bins(parsed: dict) -> list[dict]:
+    """Every bin of a parsed layout file, in reading order."""
+    return [item for row in parsed['rows'] for column in row['columns'] for item in column]
+
+
+def wanted(parsed: dict) -> dict:
+    """What has to be looked up to match a parsed layout file.
+
+    Returns {'part_pks', 'part_texts', 'location_pks', 'location_paths'}; the
+    texts are folded for comparison, the paths are still as written.
+    """
+    part_pks: set = set()
+    part_texts: set = set()
+    location_pks: set = set()
+    location_paths: set = set()
+
+    refs = [item['part'] for item in file_bins(parsed)] + [parsed.get('product')]
+
+    for ref in refs:
+        if not ref:
+            continue
+
+        if ref['pk']:
+            part_pks.add(ref['pk'])
+
+        for key in ('ipn', 'name', 'text'):
+            if ref[key]:
+                part_texts.add(_fold(ref[key]))
+
+    for item in file_bins(parsed):
+        ref = item['location']
+
+        if not ref:
+            continue
+
+        if ref['pk']:
+            location_pks.add(ref['pk'])
+
+        if ref['path']:
+            location_paths.add(ref['path'])
+
+    return {
+        'part_pks': part_pks,
+        'part_texts': part_texts,
+        'location_pks': location_pks,
+        'location_paths': location_paths,
+    }
+
+
+def match_part(ref: dict, parts: list[dict]) -> tuple[int | None, str]:
+    """Find the part a reference means among the candidates.
+
+    'parts' is a list of {'pk', 'ipn', 'name'}. Returns (pk, '') or
+    (None, why not).
+
+    - If the reference has a number, and the part with that number has the
+      IPN or name the reference gives (or it gives neither), that is the part.
+    - Otherwise the part is found by IPN, by name, or by both when both are
+      given. A number which belongs to a different part is not trusted: in
+      another InvenTree the numbers are different.
+    - Two parts which fit equally are not guessed between, unless the number
+      picks one of them.
+    """
+    by_pk = {part['pk']: part for part in parts}
+    named = bool(ref['ipn'] or ref['name'] or ref['text'])
+
+    if ref['pk'] and ref['pk'] in by_pk:
+        part = by_pk[ref['pk']]
+
+        if (
+            not named
+            or (ref['ipn'] and _same(part['ipn'], ref['ipn']))
+            or (ref['name'] and _same(part['name'], ref['name']))
+            or (ref['text'] and (_same(part['ipn'], ref['text']) or _same(part['name'], ref['text'])))
+        ):
+            return part['pk'], ''
+
+    if not named:
+        return None, 'there is no part with that number'
+
+    if ref['text']:
+        found = [part for part in parts if part['ipn'] and _same(part['ipn'], ref['text'])]
+
+        if not found:
+            found = [part for part in parts if _same(part['name'], ref['text'])]
+    else:
+        found = parts
+
+        if ref['ipn']:
+            found = [part for part in found if part['ipn'] and _same(part['ipn'], ref['ipn'])]
+
+        if ref['name']:
+            both = [part for part in found if _same(part['name'], ref['name'])]
+
+            # The IPN decides when the name has changed since the file was made
+            found = both if both or not ref['ipn'] else found
+
+    if len(found) == 1:
+        return found[0]['pk'], ''
+
+    if len(found) > 1:
+        if ref['pk'] and any(part['pk'] == ref['pk'] for part in found):
+            return ref['pk'], ''
+
+        return None, f'{len(found)} parts match'
+
+    if ref['pk'] and ref['pk'] in by_pk:
+        # Say what the number is here: often the part was only renamed
+        return None, f'no such part (number {ref["pk"]} is "{by_pk[ref["pk"]]["name"]}" here)'
+
+    return None, 'no such part'
+
+
+def match_location(ref: dict, locations: list[dict], unit_path: str) -> tuple[int | None, str]:
+    """Find the location a reference means. 'locations' is a list of {'pk', 'path'}."""
+    by_pk = {place['pk']: place for place in locations}
+    path = absolute_path(ref['path'], unit_path) if ref['path'] else ''
+
+    if ref['pk'] and ref['pk'] in by_pk:
+        if not path or _same(by_pk[ref['pk']]['path'], path):
+            return ref['pk'], ''
+
+    if not path:
+        return None, 'there is no location with that number'
+
+    found = [place for place in locations if _same(place['path'], path)]
+
+    if len(found) == 1:
+        return found[0]['pk'], ''
+
+    if len(found) > 1:
+        if ref['pk'] and any(place['pk'] == ref['pk'] for place in found):
+            return ref['pk'], ''
+
+        return None, f'{len(found)} locations match'
+
+    return None, 'no such location'
+
+
+def reuse_ids(layout: dict, previous: dict | None) -> dict:
+    """Give the bins of a new layout the ids of the bins they replace.
+
+    When a layout is downloaded, edited and uploaded into the unit it came
+    from, a bin which still shows the same thing keeps its id, and with it the
+    record of when it was last counted.
+    """
+    if not previous:
+        return layout
+
+    spare: dict[tuple, list[str]] = {}
+
+    for item in all_bins(previous):
+        spare.setdefault((item['part'], item['location'], item['label']), []).append(item['id'])
+
+    taken: set = set()
+    waiting = []
+
+    for item in all_bins(layout):
+        ids = spare.get((item['part'], item['location'], item['label']))
+
+        if ids:
+            item['id'] = ids.pop(0)
+            taken.add(item['id'])
+        else:
+            waiting.append(item)
+
+    for item in waiting:
+        if item['id'] in taken:
+            item['id'] = new_id('b', taken)
+        else:
+            taken.add(item['id'])
+
+    return layout
+
+
+def export_layout(
+    layout: dict,
+    *,
+    name: str,
+    parts: dict[int, dict],
+    locations: dict[int, dict],
+    unit_path: str,
+) -> dict:
+    """Describe a layout for a layout file.
+
+    'parts' maps a part number to {'ipn', 'name'}, 'locations' a location
+    number to {'path'}. A part or location which is not in them is written
+    with its number only.
+    """
+
+    def part_out(pk):
+        info = parts.get(pk) or {}
+        out = {}
+
+        if info.get('ipn'):
+            out['ipn'] = info['ipn']
+
+        if info.get('name'):
+            out['name'] = info['name']
+
+        out['pk'] = pk
+
+        return out
+
+    def bin_out(item):
+        out = {}
+
+        if item['label']:
+            out['label'] = item['label']
+
+        if item['part']:
+            out['part'] = part_out(item['part'])
+
+        if item['location']:
+            info = locations.get(item['location']) or {}
+            place = {}
+
+            if info.get('path'):
+                place['path'] = relative_path(info['path'], unit_path)
+
+            place['pk'] = item['location']
+            out['location'] = place
+
+        out['size'] = item['size']
+
+        for key in ('min', 'max'):
+            if item[key] is not None:
+                value = item[key]
+                out[key] = int(value) if float(value).is_integer() else value
+
+        if item['note']:
+            out['note'] = item['note']
+
+        return out
+
+    return {
+        'format': FILE_FORMAT,
+        'version': FILE_VERSION,
+        'name': name,
+        'kind': layout['kind'],
+        'product': part_out(layout['product']) if layout.get('product') else None,
+        'rows': [
+            {
+                'name': row['name'],
+                'columns': [[bin_out(item) for item in column['bins']] for column in row['columns']],
+            }
+            for row in layout['rows']
+        ],
+    }
+
+
+def format_layout_file(doc: dict) -> str:
+    """Write a layout file as JSON which is pleasant to edit: one bin on a line."""
+    import json
+
+    def text(value) -> str:
+        return json.dumps(value, ensure_ascii=False)
+
+    lines = ['{']
+
+    for key in ('format', 'version', 'name', 'kind', 'product'):
+        lines.append(f'  {text(key)}: {text(doc.get(key))},')
+
+    lines.append('  "rows": [')
+
+    rows = doc.get('rows') or []
+
+    for r, row in enumerate(rows):
+        lines.append('    {')
+        lines.append(f'      "name": {text(row.get("name", ""))},')
+        lines.append('      "columns": [')
+
+        columns = row.get('columns') or []
+
+        for c, column in enumerate(columns):
+            end = ',' if c < len(columns) - 1 else ''
+
+            if len(column) == 1:
+                lines.append(f'        [{text(column[0])}]{end}')
+            else:
+                lines.append('        [')
+
+                for b, item in enumerate(column):
+                    comma = ',' if b < len(column) - 1 else ''
+                    lines.append(f'          {text(item)}{comma}')
+
+                lines.append(f'        ]{end}')
+
+        lines.append('      ]')
+        lines.append('    }' + (',' if r < len(rows) - 1 else ''))
+
+    lines.append('  ]')
+    lines.append('}')
+
+    return '\n'.join(lines) + '\n'

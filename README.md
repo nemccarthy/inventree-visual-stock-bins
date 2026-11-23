@@ -38,6 +38,7 @@ unit, a rack. On its drawing you can:
 | **Refill** | A list of the bins which are due, how much each needs and where the stock is, with a button to move it |
 | **Units covered** | Name the product which is built at a bench, and every bin shows how many units it is enough for - and the bench how many it can build, and which bin runs out first |
 | **Full window** | For a tablet at the bench or a screen on the wall. The drawing reloads by itself |
+| **Layout files** | Download the layout of a unit as a file, edit it, and upload it into the same location or another one |
 
 ![A bin, opened](https://raw.githubusercontent.com/nemccarthy/inventree-visual-stock-bins/main/docs/images/bin.png)
 
@@ -159,6 +160,99 @@ For a screen at the bench, open the unit and press *Full window* - or bookmark
 `/web/plugin/virtual-bins/units?unit=<location id>&kiosk=1`, which opens it
 that way.
 
+A second bench like the first does not have to be drawn again: download the
+layout of the first as a file and upload it into the other location. See
+[Layout files](#layout-files).
+
+## Layout files
+
+A layout can be kept as a file: a JSON file which names parts by IPN and name,
+and stock locations by path, so that it reads the same in another location or
+another InvenTree. In the editor, under **Layout file**:
+
+- **Download** saves the layout which is in the editor, saved or not, as
+  `virtual-bins-<location>.json`.
+- **Upload** reads a file into the editor. It replaces the bins which are
+  there (and asks first). Nothing is saved until you press *Save layout*.
+
+After an upload the editor lists what it could not match. Those bins are kept,
+as placeholders under their label, so the drawing is complete; select one and
+the part search starts from its label.
+
+![A layout file, uploaded: two of its parts are not in InvenTree](https://raw.githubusercontent.com/nemccarthy/inventree-visual-stock-bins/main/docs/images/layout-file.png)
+
+The file is meant to be edited by hand. One bin is on one line:
+
+```json
+{
+  "format": "inventree-virtual-bins",
+  "version": 1,
+  "name": "Assembly bench 1",
+  "kind": "bench",
+  "product": "OSN-100",
+  "rows": [
+    {
+      "name": "Left bay",
+      "columns": [
+        [{"part": "EL-301", "size": "m", "min": 10, "max": 30}],
+        [
+          {"part": {"ipn": "EL-302", "name": "Radio module"}, "min": 10, "max": 30},
+          {"part": "Antenna, stub", "location": "./Tray 2"}
+        ],
+        [{"label": "Rework", "location": "Stores/Rework shelf", "size": "l", "note": "Checked on Fridays"}],
+        [{"label": "Spare bin"}]
+      ]
+    }
+  ]
+}
+```
+
+| | |
+| --- | --- |
+| `format`, `version` | What a downloaded file starts with. A file written by hand can leave them out |
+| `name` | The location the file was downloaded from. For the reader only: an upload does not use it |
+| `kind` | `bench` (the default) or `shelving` |
+| `product` | The part which is built here, for units covered. A part, written as below; it has to be an assembly |
+| `rows` | From the top down. A row is `{"name": ..., "columns": [...]}`, or just the list of its columns |
+| a column | The bins of one stack, from the top down, in `[ ]`. A column of one bin can be written as that bin alone |
+| a bin | `part`, `location`, `label`, `size` (`s`, `m` or `l`; `s` if left out), `min`, `max` and `note`. All can be left out: a bin with only a `label` is a placeholder |
+
+A **part** is written as
+
+- a text, `"EL-301"`: the part with that IPN or, if there is none, the part
+  with that name
+- `{"ipn": "EL-301", "name": "Main board PCBA", "pk": 31}`, with any of the
+  three: this is what a download writes. `pk` is the number of the part in
+  the InvenTree the file came from
+- a number, `31`: the part with that number
+
+and a **location** as
+
+- a path, `"Stores/Shelf A/A1"`
+- a path from the unit itself, `"./A1"` or `"./Drawer 2/Left"`. A download
+  writes the locations below the unit this way, so the file fits another unit
+  with the same locations below it. `"."` is the unit
+- `{"path": "./A1", "pk": 8}`, or a number
+
+How they are matched:
+
+- IPNs, names and paths have to be the same, but capitals do not matter.
+- A number is only trusted when the part with that number has the IPN or the
+  name the file gives (or the file gives neither). In another InvenTree the
+  numbers mean other parts, and there the IPN and the name find the part.
+- With an IPN and a name, the IPN decides if the part has been renamed since.
+- When two parts fit, neither is chosen, unless the number picks one of them.
+- A part or location which is not found is never replaced by a near match.
+  The bin becomes a placeholder and is listed.
+
+Bins have no ids in the file. When a file is uploaded into the location it
+came from, the bins which still have the same part, location and label keep
+when they were last counted.
+
+Two files to start from are in [`examples/`](examples): a bench and a
+shelving unit whose bins are stock locations of their own. They name the
+parts of the demo data which `dev/seed_demo.py` makes.
+
 ## Settings
 
 In *Admin Center → Plugins → VirtualBins*:
@@ -181,7 +275,7 @@ In *Admin Center → Plugins → VirtualBins*:
 | See the drawings | *view* on Stock Items and on Stock Locations |
 | Count, add, remove, move, top up | *change* on Stock Items |
 | Count or add into an empty bin (which creates a stock item) | *add* on Stock Items as well |
-| Set up, edit or remove a layout | *change* on Stock Locations |
+| Set up, edit or remove a layout, and upload a layout file | *change* on Stock Locations |
 
 People who cannot change a layout only see the **Bins** panel on locations
 which have one.
@@ -198,6 +292,8 @@ authentication.
 | `PUT unit/<location>/layout/` | Save a layout: `{"layout": {...}}` |
 | `DELETE unit/<location>/layout/` | Remove the layout |
 | `POST unit/<location>/autofill/` | Suggest a layout from `stock`, `children` or a `bom`. Nothing is saved |
+| `GET unit/<location>/export/` | The saved layout as a [layout file](#layout-files): `{"filename", "data", "text"}`. `POST` with `{"layout": {...}}` does the same for a layout which is not saved |
+| `POST unit/<location>/import/` | Read a layout file, `{"data": {...}}`, into a layout for this location, with a report of what was not matched. Nothing is saved |
 | `GET unit/<location>/refill/` | The bins which are due, with where the stock is |
 | `GET unit/<location>/bin/<bin>/sources/` | Stock a bin can be topped up from |
 | `POST unit/<location>/bin/<bin>/adjust/` | Change the stock of a bin |
@@ -302,7 +398,7 @@ have git. Copy it into the data volume (for example `<data-volume>/wheels/`)
 and put its path in `plugins.txt` instead:
 
 ```
-/home/inventree/data/wheels/inventree_virtual_bins-0.1.0-py3-none-any.whl
+/home/inventree/data/wheels/inventree_virtual_bins-0.2.0-py3-none-any.whl
 ```
 
 ### 2. Enable it
@@ -394,12 +490,13 @@ npm run build        # writes inventree_virtual_bins/static - commit the result
 
 | | |
 | --- | --- |
-| `inventree_virtual_bins/layout.py` | The layout, levels, counting rules and units covered. No Django or InvenTree imports |
+| `inventree_virtual_bins/layout.py` | The layout, levels, counting rules, units covered and layout files. No Django or InvenTree imports |
 | `inventree_virtual_bins/stock.py` | Reads the stock of a unit from InvenTree, and changes it |
 | `inventree_virtual_bins/store.py` | Where layouts and "locate" requests are kept |
 | `inventree_virtual_bins/views.py` | The API |
 | `inventree_virtual_bins/core.py` | The plugin class: settings, URLs, interface and "locate" |
 | `frontend/src/` | The drawing, the editor, the bin drawer, the count walk and the refill list |
+| `examples/` | Two layout files, for the demo data |
 | `dev/seed_demo.py` | Fills a throwaway InvenTree with the demo data used in the screenshots |
 | `dev/test_users.py` | Makes a view-only user, an operator and a user without roles |
 | `dev/integration_check.py` | Checks the plugin against the InvenTree API, on data it creates itself |

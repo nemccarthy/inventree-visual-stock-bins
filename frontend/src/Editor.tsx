@@ -21,9 +21,11 @@ import {
   IconArrowRight,
   IconArrowUp,
   IconCopy,
+  IconDownload,
   IconPlus,
   IconStack2,
-  IconTrash
+  IconTrash,
+  IconUpload
 } from '@tabler/icons-react';
 import { type DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -62,6 +64,8 @@ import type {
   AutofillResult,
   BinData,
   BinSize,
+  ExportResult,
+  ImportResult,
   Layout,
   LayoutBin,
   UnitData,
@@ -192,6 +196,8 @@ function BinForm({
         }}
         label='Part'
         placeholder='Search for a part'
+        // A bin which came in without a part: start from what it is called
+        suggest={item.part === null ? item.label : undefined}
       />
       <RemoteSelect
         context={context}
@@ -341,7 +347,10 @@ export function Editor({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [confirm, setConfirm] = useState<'cancel' | 'delete' | null>(null);
+  const [warning, setWarning] = useState<{ title: string; lines: string[] } | null>(null);
+  const [confirm, setConfirm] = useState<'cancel' | 'delete' | 'import' | null>(null);
+  const [upload, setUpload] = useState<{ name: string; data: unknown; bins: number } | null>(null);
+  const fileInput = useRef<HTMLInputElement | null>(null);
   const [bomPart, setBomPart] = useState<number | null>(null);
   const [bomLevels, setBomLevels] = useState('direct');
   const [canvasRef, canvasWidth] = useWidth<HTMLDivElement>();
@@ -383,6 +392,146 @@ export function Editor({
     setLayout(next);
     setMessage(null);
     setError(null);
+  };
+
+  // Layout files
+
+  const download = () => {
+    setBusy('export');
+    setError(null);
+
+    api.current
+      .post(apiUrl(`unit/${location.pk}/export/`), { layout })
+      .then((response) => {
+        const result = apiData<ExportResult>(response, 'text');
+        const url = URL.createObjectURL(new Blob([result.text], { type: 'application/json' }));
+        const link = document.createElement('a');
+
+        link.href = url;
+        link.download = result.filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      })
+      .catch((err) => setError(apiError(err, 'Could not make the layout file')))
+      .finally(() => setBusy(null));
+  };
+
+  const runImport = (file: { name: string; data: unknown }) => {
+    setBusy('import');
+    setError(null);
+    setMessage(null);
+    setWarning(null);
+    setConfirm(null);
+
+    api.current
+      .post(apiUrl(`unit/${location.pk}/import/`), { data: file.data })
+      .then((response) => {
+        const result = apiData<ImportResult>(response, 'report');
+        const report = result.report;
+
+        setNames((previous) => {
+          const parts = { ...previous.parts };
+          const locations = { ...previous.locations };
+
+          for (const part of Object.values(result.parts)) {
+            parts[part.pk] = { name: part.name, ipn: part.ipn };
+          }
+
+          for (const place of Object.values(result.locations)) {
+            locations[place.pk] = { name: place.name, pathstring: place.pathstring };
+          }
+
+          return { parts, locations };
+        });
+        setLayout(result.layout);
+        setSelected(null);
+
+        const lines = report.unresolved.map(
+          (problem) =>
+            `${problem.label}: ${problem.kind} "${problem.wanted}" - ${problem.reason} (row ${problem.row}, column ${problem.column})`
+        );
+
+        if (report.product) {
+          lines.push(`Product built here - ${report.product}`);
+        }
+
+        setMessage(
+          `${plural(report.bins, 'bin')} loaded from ${file.name}: ${report.matched} matched` +
+            (report.placeholders > 0 ? `, ${plural(report.placeholders, 'placeholder')}` : '') +
+            '. Nothing is saved until you press "Save layout".'
+        );
+        setWarning(
+          lines.length > 0
+            ? {
+                title:
+                  report.unresolved.length > 0
+                    ? `${plural(report.unresolved.length, 'reference')} could not be matched. Select each bin to choose its part.`
+                    : 'The product could not be matched',
+                lines
+              }
+            : null
+        );
+      })
+      .catch((err) => setError(apiError(err, 'Could not read the layout file')))
+      .finally(() => {
+        setBusy(null);
+        setUpload(null);
+      });
+  };
+
+  const chooseFile = (file: File | undefined) => {
+    if (!file) {
+      return;
+    }
+
+    setError(null);
+    setMessage(null);
+    setWarning(null);
+
+    if (file.size > 2_000_000) {
+      setError('That file is too large to be a layout file.');
+      return;
+    }
+
+    file
+      .text()
+      .then((text) => {
+        let data: any;
+
+        try {
+          data = JSON.parse(text);
+        } catch (err: any) {
+          setError(`${file.name} is not valid JSON: ${err?.message ?? 'it could not be read'}`);
+          return;
+        }
+
+        const rows = Array.isArray(data?.rows) ? data.rows : [];
+        const bins = rows.reduce((sum: number, row: any) => {
+          const columns = Array.isArray(row) ? row : Array.isArray(row?.columns) ? row.columns : [];
+
+          return (
+            sum +
+            columns.reduce(
+              (count: number, column: any) =>
+                count + (Array.isArray(column) ? column.length : Array.isArray(column?.bins) ? column.bins.length : 1),
+              0
+            )
+          );
+        }, 0);
+
+        const next = { name: file.name, data, bins };
+
+        if (total > 0) {
+          // The file replaces what is in the editor: ask first
+          setUpload(next);
+          setConfirm('import');
+        } else {
+          runImport(next);
+        }
+      })
+      .catch(() => setError(`${file.name} could not be read.`));
   };
 
   const drop = (target: Target) => (event: DragEvent<HTMLElement>) => {
@@ -429,6 +578,7 @@ export function Editor({
     setBusy(source);
     setError(null);
     setMessage(null);
+    setWarning(null);
 
     api.current
       .post(apiUrl(`unit/${location.pk}/autofill/`), {
@@ -694,6 +844,23 @@ export function Editor({
           {message}
         </Alert>
       )}
+      {warning && (
+        <Alert
+          color='yellow'
+          p='xs'
+          title={warning.title}
+          withCloseButton
+          closeButtonLabel='Hide this list'
+          onClose={() => setWarning(null)}
+        >
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {warning.lines.slice(0, 12).map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+            {warning.lines.length > 12 && <li>and {warning.lines.length - 12} more</li>}
+          </ul>
+        </Alert>
+      )}
 
       <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
         <div ref={canvasRef} style={{ flex: '1 1 520px', minWidth: 0, overflowX: 'auto', paddingBottom: 8 }}>
@@ -835,6 +1002,46 @@ export function Editor({
                 Or use "Add bin" at the end of a row. Select a bin to set its part, size and levels.
               </Text>
 
+              <Divider label='Layout file' labelPosition='left' />
+              <Group gap='xs' grow>
+                <Button
+                  variant='default'
+                  size='xs'
+                  leftSection={<IconDownload size={14} />}
+                  loading={busy === 'export'}
+                  disabled={busy !== null && busy !== 'export'}
+                  onClick={download}
+                >
+                  Download
+                </Button>
+                <Button
+                  variant='default'
+                  size='xs'
+                  leftSection={<IconUpload size={14} />}
+                  loading={busy === 'import'}
+                  disabled={busy !== null && busy !== 'import'}
+                  onClick={() => fileInput.current?.click()}
+                >
+                  Upload
+                </Button>
+              </Group>
+              <input
+                ref={fileInput}
+                type='file'
+                accept='.json,application/json'
+                aria-label='Layout file to upload'
+                style={{ display: 'none' }}
+                onChange={(event) => {
+                  chooseFile(event.currentTarget.files?.[0]);
+                  // So that choosing the same file again is noticed
+                  event.currentTarget.value = '';
+                }}
+              />
+              <Text size='xs' c='dimmed'>
+                Download this layout as a file, edit it, and upload it here or into another
+                location. Parts are matched by IPN and name.
+              </Text>
+
               {configured && (
                 <>
                   <Divider />
@@ -866,7 +1073,11 @@ export function Editor({
         centered
         title={
           <Text fw={700}>
-            {confirm === 'delete' ? 'Remove the bins?' : 'Discard the changes?'}
+            {confirm === 'delete'
+              ? 'Remove the bins?'
+              : confirm === 'import'
+                ? 'Replace the bins in the editor?'
+                : 'Discard the changes?'}
           </Text>
         }
       >
@@ -874,7 +1085,9 @@ export function Editor({
           <Text size='sm'>
             {confirm === 'delete'
               ? `The layout of ${location.name} is removed. The location and its stock are not touched.`
-              : 'The changes to the layout have not been saved.'}
+              : confirm === 'import'
+                ? `${upload?.name} has ${plural(upload?.bins ?? 0, 'bin')}. They replace the ${plural(total, 'bin')} in the editor. Nothing is saved until you press "Save layout".`
+                : 'The changes to the layout have not been saved.'}
           </Text>
           <Group justify='flex-end'>
             <Button variant='default' onClick={() => setConfirm(null)}>
@@ -884,6 +1097,8 @@ export function Editor({
               <Button color='red' loading={busy === 'delete'} onClick={remove}>
                 Remove the bins
               </Button>
+            ) : confirm === 'import' ? (
+              <Button onClick={() => upload && runImport(upload)}>Replace</Button>
             ) : (
               <Button
                 color='red'

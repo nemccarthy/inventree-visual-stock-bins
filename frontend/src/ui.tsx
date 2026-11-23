@@ -232,7 +232,8 @@ export function RemoteSelect({
   clearable = true,
   disabled,
   error,
-  size
+  size,
+  suggest
 }: Readonly<{
   context: InvenTreePluginContext;
   url: string;
@@ -249,6 +250,8 @@ export function RemoteSelect({
   disabled?: boolean;
   error?: ReactNode;
   size?: string;
+  /** Searched for when the list is opened with nothing chosen and nothing typed */
+  suggest?: string;
 }>) {
   const api = useRef(context.api);
   api.current = context.api;
@@ -316,8 +319,15 @@ export function RemoteSelect({
       value={value === null ? null : String(value)}
       // The server has already filtered the list
       filter={({ options }) => options}
+      searchValue={search}
       onSearchChange={setSearch}
-      onDropdownOpen={() => setOpened(true)}
+      onDropdownOpen={() => {
+        if (value === null && !search && suggest) {
+          setSearch(suggest);
+        }
+
+        setOpened(true);
+      }}
       onDropdownClose={() => setOpened(false)}
       onChange={(next) => {
         if (next === null) {

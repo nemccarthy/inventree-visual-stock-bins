@@ -106,6 +106,8 @@ class VirtualBinsPlugin(
                 name='virtual-bins-autofill',
             ),
             path('unit/<int:pk>/refill/', views.RefillView.as_view(), name='virtual-bins-refill'),
+            path('unit/<int:pk>/export/', views.ExportView.as_view(), name='virtual-bins-export'),
+            path('unit/<int:pk>/import/', views.ImportView.as_view(), name='virtual-bins-import'),
             path(
                 'unit/<int:pk>/bin/<str:bin_id>/sources/',
                 views.SourcesView.as_view(),

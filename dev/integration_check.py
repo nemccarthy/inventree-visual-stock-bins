@@ -17,12 +17,14 @@ It checks that:
   described, and leave the history behind
 - a layout is validated, stored beside other metadata, and removed cleanly
 - generated layouts, the refill list and "locate" behave as documented
+- a layout file can be downloaded, read back, and read into another location
 - invalid input and missing permissions are refused
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import time
 import uuid
 
@@ -64,6 +66,15 @@ class Client(Api):
 
     def setting(self, key: str, value):
         self.patch(f'/api/plugins/virtual-bins/settings/{key}/', {'value': value})
+
+
+def shape(layout: dict) -> tuple:
+    """A layout without the ids of its rows and columns (those are made anew when a file is read)."""
+    return (
+        layout['kind'],
+        layout['product'],
+        [(row['name'], [column['bins'] for column in row['columns']]) for row in layout['rows']],
+    )
 
 
 def stock_total(api: Client, part: int, location: int, *, available_only=False) -> float:
@@ -240,6 +251,172 @@ def main():
     check('layout: other metadata of the location is untouched', meta.get('other_plugin') == {'keep': 1})
 
     b = [data['bins'][bin_id] for bin_id in ids]
+
+    # -------------------------------------------------------------- layout files
+
+    exported = api.get(f'{U}/unit/{unit}/export/')
+    doc = exported['data']
+    file_bins = [item for row in doc['rows'] for column in row['columns'] for item in column]
+    check('file: named after the location', exported['filename'] == 'virtual-bins-bench.json', exported['filename'])
+    check('file: says what it is',
+          doc['format'] == 'inventree-virtual-bins' and doc['version'] == 1 and doc['name'] == 'Bench'
+          and doc['kind'] == 'bench')
+    check('file: rows, columns and stacks are kept',
+          [row['name'] for row in doc['rows']] == ['Left', 'Right']
+          and [len(column) for column in doc['rows'][0]['columns']] == [1, 2, 1] and len(file_bins) == 10)
+    check('file: a part is written with its IPN, name and number',
+          file_bins[0]['part'] == {'ipn': f'VB-A-{tag}', 'name': f'Alpha {tag}', 'pk': A}, file_bins[0])
+    check('file: a part without an IPN is written with its name',
+          file_bins[2]['part'] == {'name': f'Bravo {tag}', 'pk': B}, file_bins[2])
+    check('file: a location below the unit is written relative to it',
+          file_bins[1]['location'] == {'path': './Child 1', 'pk': child1}, file_bins[1])
+    check('file: levels, sizes and labels are written',
+          file_bins[0]['min'] == 20 and file_bins[0]['max'] == 40 and file_bins[0]['size'] == 'm'
+          and file_bins[3]['label'] == 'Mixed' and 'min' not in file_bins[3])
+    check('file: a placeholder is only its label', file_bins[8] == {'label': 'Spare', 'size': 's'}, file_bins[8])
+    check('file: the product is written by name', doc['product'] == {'name': f'Assembly {tag}', 'pk': ASM})
+    check('file: has no ids of bins in it', 'id' not in exported['text'].replace('"width"', ''))
+
+    check('file: the text is the same as the object', json.loads(exported['text']) == doc)
+    check('file: one bin on a line',
+          sum(1 for line in exported['text'].splitlines() if '"size"' in line) == 10)
+
+    def read_file(data, where=unit, client=api):
+        return client.refused('POST', f'{U}/unit/{where}/import/', {'data': data})
+
+    def read_ok(data, where=unit):
+        response = api.raw('POST', f'{U}/unit/{where}/import/', {'data': data})
+
+        if response.status_code != 200:
+            check('file: is read', False, f'{response.status_code} {response.text[:300]}')
+
+        return response.json()
+
+    back = read_ok(doc)
+    check('file read back: the same layout, with the same bin ids', shape(back['layout']) == shape(layout),
+          [item['id'] for row in back['layout']['rows'] for column in row['columns'] for item in column['bins']])
+    check('file read back: everything is matched',
+          back['report']['bins'] == 10 and back['report']['matched'] == 9 and back['report']['placeholders'] == 1
+          and back['report']['unresolved'] == [] and back['report']['product'] is None, back['report'])
+    check('file read back: the names needed to show it come with it',
+          back['parts'][str(A)]['name'] == f'Alpha {tag}' and back['locations'][str(child1)]['name'] == 'Child 1',
+          list(back['parts']))
+
+    # The same file as text, as an upload would send it after JSON.parse
+    check('file read back: from its text', shape(read_ok(json.loads(exported['text']))['layout']) == shape(layout))
+
+    check('file: reading one saves nothing', api.get(f'{U}/unit/{unit}/')['layout'] == layout)
+
+    # Into another location: the parts are found, the places below the old unit are not
+    other = read_ok(doc, where=store)
+    other_bins = [item for row in other['layout']['rows'] for column in row['columns'] for item in column['bins']]
+    check('file into another location: parts are matched',
+          [item['part'] for item in other_bins] == [A, A, B, None, E, SUB, D, F, None, C], other_bins)
+    check('file into another location: places below the old unit are reported, not guessed',
+          [item['location'] for item in other_bins] == [None] * 10
+          and [(problem['kind'], problem['wanted'], problem['reason'], problem['row'], problem['column'])
+               for problem in other['report']['unresolved']] == [
+              ('location', './Child 1', 'no such location', 1, 2),
+              ('location', './Child 2', 'no such location', 1, 3),
+              ('location', './Child 2', 'no such location', 2, 1)],
+          other['report']['unresolved'])
+    check('file into another location: the report names the bin',
+          [problem['label'] for problem in other['report']['unresolved']] == [f'Alpha {tag}', 'Mixed', f'Echo {tag}'],
+          other['report']['unresolved'])
+    check('file into another location: bins get new ids',
+          not set(item['id'] for item in other_bins) & set(ids) and len({item['id'] for item in other_bins}) == 10)
+    check('file into another location: nothing is saved there', api.get(f'{U}/unit/{store}/')['configured'] is False)
+
+    # A file written by hand
+    by_hand = {
+        'kind': 'shelving',
+        'product': f'assembly {tag}'.upper(),
+        'rows': [
+            {'name': 'Top', 'columns': [
+                [{'part': f'vb-a-{tag}', 'min': 5, 'max': 9}, {'part': f'BRAVO {tag}'}],
+                {'part': {'ipn': f'VB-A-{tag}', 'name': 'An old name'}, 'location': f'vb root {tag}/store', 'size': 'l'},
+                [{'part': E, 'location': child2}],
+            ]},
+            [[{'part': 'No such part', 'note': 'n'}], [{'part': {'name': f'Virtual {tag}'}}],
+             [{'part': {'pk': A, 'name': 'Renamed'}}], [{'part': f'Echo {tag}', 'location': './Nowhere'}],
+             [{'label': 'Spare'}, {'location': '.'}]],
+        ],
+    }
+    hand = read_ok(by_hand, where=plain)
+    hand_bins = [item for row in hand['layout']['rows'] for column in row['columns'] for item in column['bins']]
+    check('file by hand: parts by IPN, by name and by number, in any case',
+          [item['part'] for item in hand_bins] == [A, B, A, E, None, None, None, E, None, None], hand_bins)
+    check('file by hand: locations by path and by number, and "." is the unit itself',
+          [item['location'] for item in hand_bins] == [None, None, store, child2, None, None, None, None, None, plain],
+          hand_bins)
+    check('file by hand: kind, row names, sizes and levels',
+          hand['layout']['kind'] == 'shelving' and [row['name'] for row in hand['layout']['rows']] == ['Top', '']
+          and hand_bins[2]['size'] == 'l' and hand_bins[0]['min'] == 5 and hand_bins[0]['max'] == 9)
+    check('file by hand: the product is found by name', hand['layout']['product'] == ASM and hand['report']['product'] is None)
+    check('file by hand: a part which is not found leaves a placeholder with its name',
+          hand_bins[4]['label'] == 'No such part' and hand_bins[4]['note'] == 'n' and hand_bins[5]['label'] == f'Virtual {tag}')
+    problems = [(problem['kind'], problem['wanted'], problem['reason']) for problem in hand['report']['unresolved']]
+    check('file by hand: what was not found is reported with the reason', problems == [
+        ('part', 'No such part', 'no such part'),
+        ('part', f'Virtual {tag}', 'it is a virtual part, which has no stock'),
+        ('part', 'Renamed', f'no such part (number {A} is "Alpha {tag}" here)'),
+        ('location', './Nowhere', 'no such location'),
+    ], problems)
+    check('file by hand: the count of bins', hand['report']['bins'] == 10 and hand['report']['matched'] == 5
+          and hand['report']['placeholders'] == 1, hand['report'])
+
+    code, text = api.refused('PUT', f'{U}/unit/{plain}/layout/', {'layout': hand['layout']})
+    check('file by hand: what was read can be saved', code == 200, text[:300])
+    saved = api.get(f'{U}/unit/{plain}/')
+    saved_ids = [item['id'] for row in saved['layout']['rows'] for column in row['columns'] for item in column['bins']]
+    check('file by hand: the bins show stock', close(saved['bins'][saved_ids[2]]['quantity'], stock_total(api, A, store))
+          and close(saved['bins'][saved_ids[3]]['quantity'], 9), saved['bins'][saved_ids[2]]['quantity'])
+
+    # ... and what was saved comes back out as a file which reads the same
+    again = read_ok(api.get(f'{U}/unit/{plain}/export/')['data'], where=plain)
+    check('file by hand: download and upload give the saved layout', shape(again['layout']) == shape(saved['layout']))
+    check('file by hand: a location outside the unit is written with its whole path',
+          any(item.get('location', {}).get('path') == f'VB root {tag}/Store'
+              for row in api.get(f'{U}/unit/{plain}/export/')['data']['rows'] for column in row['columns'] for item in column))
+    check('file by hand: the unit itself is written as "."',
+          any(item.get('location', {}).get('path') == '.'
+              for row in api.get(f'{U}/unit/{plain}/export/')['data']['rows'] for column in row['columns'] for item in column))
+
+    product_file = read_ok({'product': f'Alpha {tag}', 'rows': []}, where=plain)
+    check('file: a product which is not an assembly is left out and reported',
+          product_file['layout']['product'] is None and 'not an assembly' in product_file['report']['product'],
+          product_file['report'])
+    product_file = read_ok({'product': 'Nothing', 'rows': []}, where=plain)
+    check('file: a product which is not found is left out and reported',
+          product_file['layout']['product'] is None and 'no such part' in product_file['report']['product'],
+          product_file['report'])
+
+    # A layout which is not saved yet (what the editor sends)
+    unsaved = api.raw('POST', f'{U}/unit/{child1}/export/', {'layout': one(part=B, min=3)})
+    check('file: of a layout which is not saved', unsaved.status_code == 200
+          and unsaved.json()['data']['rows'][0]['columns'][0][0]['part'] == {'name': f'Bravo {tag}', 'pk': B}
+          and unsaved.json()['filename'] == 'virtual-bins-child-1.json', unsaved.text[:300])
+    check('file: making one saves nothing', api.get(f'{U}/unit/{child1}/')['configured'] is False)
+    check('file: of a location without bins is a 404',
+          api.status('GET', f'{U}/unit/{child1}/export/') == 404 and api.status('POST', f'{U}/unit/{child1}/export/', {}) == 404)
+    check('file: of an unknown location is a 404',
+          api.status('GET', f'{U}/unit/99999999/export/') == 404
+          and api.status('POST', f'{U}/unit/99999999/import/', {'data': doc}) == 404)
+
+    for name, content, expect in (
+        ('nothing', None, 'must be a JSON object'),
+        ('a list', [1, 2], 'must be a JSON object'),
+        ('a file of something else', {'format': 'kicad', 'rows': []}, 'not a Virtual Bins layout file'),
+        ('a file of a newer version', {'format': 'inventree-virtual-bins', 'version': 2, 'rows': []}, 'newer version'),
+        ('a file without rows', {'kind': 'bench'}, 'rows'),
+        ('a size which does not exist', {'rows': [[[{'size': 'xl'}]]]}, 'Row 1, column 1'),
+        ('levels the wrong way round', {'rows': [[[{'part': A, 'min': 9, 'max': 2}]]]}, 'cannot be below'),
+        ('too many bins in a stack', {'rows': [[[{}] * 9]]}, 'stack'),
+    ):
+        code, text = read_file(content)
+        check(f'file refused: {name}', code == 400 and expect in text, f'{code} {text[:200]}')
+
+    api.call('DELETE', f'{U}/unit/{plain}/layout/')
 
     # ----------------------------------------------- quantities against InvenTree
 
@@ -730,6 +907,9 @@ def main():
         check('viewer: may not remove a layout', viewer.status('DELETE', f'{U}/unit/{unit}/layout/') == 403)
         check('viewer: may not make a layout', viewer.status('POST', f'{U}/unit/{unit}/autofill/', {'source': 'stock'}) == 403)
         check('viewer: may not change stock', adjust(ids[0], {'action': 'count', 'quantity': 1}, client=viewer)[0] == 403)
+        check('viewer: may download the layout file', viewer.status('GET', f'{U}/unit/{unit}/export/') == 200)
+        check('viewer: may not read a layout file in',
+              viewer.status('POST', f'{U}/unit/{unit}/import/', {'data': {'rows': []}}) == 403)
         features = viewer.get(f'/api/plugins/ui/features/panel/?target_model=stocklocation&target_id={store}')
         check('viewer: no panel on a location without bins',
               not any(feature['plugin_name'] == 'virtual-bins' for feature in features))
@@ -745,6 +925,8 @@ def main():
         code, text = adjust(ids[2], {'action': 'count', 'quantity': before + 1}, client=operator)
         check('operator: may count', code == 200 and close(stock_total(api, B, unit), before + 1), text[:200])
         check('operator: may not save a layout', operator.status('PUT', f'{U}/unit/{unit}/layout/', {'layout': stored}) == 403)
+        check('operator: may not read a layout file in',
+              operator.status('POST', f'{U}/unit/{unit}/import/', {'data': {'rows': []}}) == 403)
 
         ok(ids[7], {'action': 'count', 'quantity': 0})
         code, text = adjust(ids[7], {'action': 'count', 'quantity': 2}, client=operator)
@@ -767,8 +949,11 @@ def main():
             nobody.status('GET', f'{U}/locate/'),
             nobody.status('PUT', f'{U}/unit/{unit}/layout/', {'layout': stored}),
             adjust(ids[0], {'action': 'count', 'quantity': 1}, client=nobody)[0],
+            nobody.status('GET', f'{U}/unit/{unit}/export/'),
+            nobody.status('POST', f'{U}/unit/{unit}/export/', {'layout': stored}),
+            nobody.status('POST', f'{U}/unit/{unit}/import/', {'data': {'rows': []}}),
         ]
-        check('no roles: everything is refused', codes == [403] * 7, codes)
+        check('no roles: everything is refused', codes == [403] * 10, codes)
 
         for kind in ('navigation', 'dashboard'):
             features = nobody.get(f'/api/plugins/ui/features/{kind}/')
